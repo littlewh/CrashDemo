@@ -245,12 +245,12 @@ void CrashHandler::Install(const std::wstring& reporterPath, DumpLevel level, bo
     SetThreadStackGuarantee(&guaranteeSize);
 
     // 2. 安装向量化异常处理器（含栈溢出专用）
-	//  VEH 的优先级高于 SEH，可以捕获更多异常（如栈溢出），并且不受当前模块的 SEH 影响
+	//  VEH 的优先级高于 UEF，可以捕获更多异常（如栈溢出），并且不受当前模块的 SEH 影响
     AddVectoredExceptionHandler(1, VectoredHandler);
     AddVectoredExceptionHandler(1, StackOverflowHandler);
 
     // 3. 未处理异常过滤器
-	//  UEH 的最后一道防线，捕获所有未被前面处理器捕获的异常
+	//  UEF 的最后一道防线，捕获所有未被前面处理器捕获的异常
     SetUnhandledExceptionFilter(TopLevelFilter);
 
     // 4. C++ 运行时钩子
