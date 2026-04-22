@@ -12,6 +12,7 @@
 // 全局配置
 static CrashHandler::DumpLevel g_DumpLevel = CrashHandler::DumpLevel::Normal;
 static std::wstring g_ReporterPath;
+static std::atomic<bool> g_Dumping{ false };
 static HANDLE g_WatchdogThread = nullptr;
 static bool g_EnableWatchdog = true;
 
@@ -65,43 +66,12 @@ static std::wstring GetDumpPath(DWORD exceptionCode)
     return path;
 }
 
-// 挂起除当前线程外的所有线程
-static void SuspendOtherThreads(DWORD selfThreadId)
-{
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) return;
 
-    THREADENTRY32 te = { sizeof(te) };
-    if (Thread32First(hSnapshot, &te))
-    {
-        do
-        {
-            if (te.th32OwnerProcessID == GetCurrentProcessId() &&
-                te.th32ThreadID != selfThreadId)
-            {
-                HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
-                if (hThread)
-                {
-                    SuspendThread(hThread);
-                    CloseHandle(hThread);
-                }
-            }
-        } while (Thread32Next(hSnapshot, &te));
-    }
-    CloseHandle(hSnapshot);
-}
-
-#include <fstream>
-#include <iostream>
 // 独立 Reporter 进程启动函数（供外部调用）
 void CrashHandler::GenerateCrashDump(DWORD exceptionCode)
 {
-    static std::atomic<bool> dumping{ false };
-    if (dumping.exchange(true))
+    if (g_Dumping.exchange(true))
         return;
-
-    // 1. 挂起所有其他线程，冻结进程状态
-    SuspendOtherThreads(GetCurrentThreadId());
 
     if (g_ReporterPath.empty())
     {
@@ -128,8 +98,7 @@ void CrashHandler::GenerateCrashDump(DWORD exceptionCode)
             CloseHandle(pi.hThread);
         }
     }
-    // 3. 强制终止进程
-    TerminateProcess(GetCurrentProcess(), 0xDEAD0003);
+    g_Dumping = false;
 }
 
 // 内部调用：从异常信息启动 Reporter
