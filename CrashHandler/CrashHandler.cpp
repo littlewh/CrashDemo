@@ -12,11 +12,11 @@
 // 全局配置
 static CrashHandler::DumpLevel g_DumpLevel = CrashHandler::DumpLevel::Normal;
 static std::wstring g_ReporterPath;
-//static std::atomic<bool> g_Dumping{ false };
 static HANDLE g_WatchdogThread = nullptr;
 static bool g_EnableWatchdog = true;
 static HANDLE g_CrashMutex = nullptr;           // 命名互斥体
 static std::atomic<DWORD> g_CrashingThreadId{ 0 };
+static std::atomic<bool> g_GlobalInitDone{ false };//初始化标志，确保全局只初始化一次
 
 // 生成 MINIDUMP_TYPE
 MINIDUMP_TYPE CrashHandler::GetDumpType(const CrashHandler::DumpLevel& i_emLevel)
@@ -97,9 +97,6 @@ static void SuspendOtherThreads(DWORD crashingThreadId)
 // 独立 Reporter 进程启动函数（供外部调用）
 void CrashHandler::GenerateCrashDump(DWORD exceptionCode)
 {
-    //if (g_Dumping.exchange(true))
-    //    return;
-
     DWORD currentThreadId = GetCurrentThreadId();
     // 记录第一个崩溃的线程ID
     DWORD expected = 0;
@@ -143,7 +140,6 @@ void CrashHandler::GenerateCrashDump(DWORD exceptionCode)
             CloseHandle(pi.hThread);
         }
     }
-    //g_Dumping = false;
 }
 
 // 内部调用：从异常信息启动 Reporter
@@ -161,6 +157,13 @@ LONG CALLBACK VectoredHandler(EXCEPTION_POINTERS* ex)
         return EXCEPTION_CONTINUE_SEARCH;
     LaunchReporter(ex);
     return EXCEPTION_CONTINUE_SEARCH;
+}
+
+LONG WINAPI MyFilter(EXCEPTION_POINTERS*)
+{
+    OutputDebugStringA("UEF called!\n");
+    MessageBoxA(NULL, "UEF called", "Test", MB_OK);
+    return EXCEPTION_EXECUTE_HANDLER;
 }
 
 LONG WINAPI TopLevelFilter(EXCEPTION_POINTERS* ex)
@@ -241,59 +244,58 @@ static DWORD WINAPI WatchdogProc(LPVOID)
 // ==================== 安装函数 ====================
 void CrashHandler::Install(const std::wstring& reporterPath, DumpLevel level, bool enableWatchdog)
 {
-    static bool installed = false;
-    if (installed)
+    // 进程全局只做一次的操作（如创建互斥体、启动看门狗、注册 VEH）
+	// 避免多次调用 Install 导致重复注册处理器、启动多个看门狗线程等问题
+    if (!g_GlobalInitDone.exchange(true))
     {
-        wprintf(L"[CrashHandler] Already installed, skipping.\n");
-        return;
+        if (!g_CrashMutex)
+            g_CrashMutex = CreateMutexW(nullptr, FALSE, L"Global\\CAD_CrashMutex");  // 全局命名Mutex
+
+        g_DumpLevel = level;
+        g_ReporterPath = reporterPath.empty() ? L"CrashReporter.exe" : reporterPath;
+        g_EnableWatchdog = enableWatchdog;
+
+        // 1. 预留栈溢出备用空间（64KB）
+        //  用以发生栈溢出时，仍能在备用栈上执行异常处理器，生成 Dump
+        ULONG guaranteeSize = 65536;
+        SetThreadStackGuarantee(&guaranteeSize);
+
+        // 2. 安装向量化异常处理器（含栈溢出专用）
+        //  VEH 的优先级高于 UEF，可以捕获更多异常（如栈溢出），并且不受当前模块的 SEH 影响
+        //  VEH 链表累加，后安装的先执行，所以先安装通用处理器，再安装专门处理栈溢出的处理器，确保栈溢出时能正确处理
+        AddVectoredExceptionHandler(1, VectoredHandler);
+        AddVectoredExceptionHandler(1, StackOverflowHandler);
+
+        // 3. C++ 运行时钩子
+        //  捕获纯虚函数调用、无效参数、std::terminate 导致的崩溃等 C++ 运行时错误
+        std::set_terminate(TerminateHandler);
+        _set_purecall_handler(PureCallHandler);
+        _set_invalid_parameter_handler(InvalidParameterHandler);
+        _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+
+        // 4. C 信号
+        //  捕获 SIGABRT、SIGTERM 等信号引发的崩溃
+        signal(SIGABRT, SignalHandler);
+        signal(SIGTERM, SignalHandler);
+
+        // 5. 禁用 Windows 错误报告弹窗
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+
+        // 6. 启动看门狗线程（可选）
+        //  看门狗线程定期检查主线程心跳，如果主线程长时间无响应（可能死循环或卡死），强制生成 Dump
+        if (g_EnableWatchdog)
+        {
+            g_WatchdogThread = CreateThread(nullptr, 0, WatchdogProc, nullptr, 0, nullptr);
+        }
+
+        wprintf(L"[CrashHandler] Installed. Reporter: %ls, Level: %d, Watchdog: %s\n",
+            g_ReporterPath.c_str(), (int)level, enableWatchdog ? "ON" : "OFF");
     }
-    installed = true;
-
-    if (!g_CrashMutex)
-        g_CrashMutex = CreateMutexW(nullptr, FALSE, L"Global\\CAD_CrashMutex");  // 全局命名Mutex
-
-    g_DumpLevel = level;
-    g_ReporterPath = reporterPath.empty() ? L"CrashReporter.exe" : reporterPath;
-    g_EnableWatchdog = enableWatchdog;
-
-    // 1. 预留栈溢出备用空间（64KB）
-	//  用以发生栈溢出时，仍能在备用栈上执行异常处理器，生成 Dump
-    ULONG guaranteeSize = 65536;
-    SetThreadStackGuarantee(&guaranteeSize);
-
-    // 2. 安装向量化异常处理器（含栈溢出专用）
-	//  VEH 的优先级高于 UEF，可以捕获更多异常（如栈溢出），并且不受当前模块的 SEH 影响
-    AddVectoredExceptionHandler(1, VectoredHandler);
-    AddVectoredExceptionHandler(1, StackOverflowHandler);
-
-    // 3. 未处理异常过滤器
-	//  UEF 的最后一道防线，捕获所有未被前面处理器捕获的异常
+    // 未处理异常过滤器
+    //  UEF 的最后一道防线，捕获所有未被前面处理器捕获的异常
+    //  UEF 单个指针覆盖
+    // 每次调用都必须重新设置的 UEF（因为可能被其它代码覆盖）
     SetUnhandledExceptionFilter(TopLevelFilter);
-
-    // 4. C++ 运行时钩子
-	//  捕获纯虚函数调用、无效参数、std::terminate 导致的崩溃等 C++ 运行时错误
-    std::set_terminate(TerminateHandler);
-    _set_purecall_handler(PureCallHandler);
-    _set_invalid_parameter_handler(InvalidParameterHandler);
-    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
-
-    // 5. C 信号
-	//  捕获 SIGABRT、SIGTERM 等信号引发的崩溃
-    signal(SIGABRT, SignalHandler);
-    signal(SIGTERM, SignalHandler);
-
-    // 6. 禁用 Windows 错误报告弹窗
-    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
-
-    // 7. 启动看门狗线程（可选）
-	//  看门狗线程定期检查主线程心跳，如果主线程长时间无响应（可能死循环或卡死），强制生成 Dump
-    if (g_EnableWatchdog)
-    {
-        g_WatchdogThread = CreateThread(nullptr, 0, WatchdogProc, nullptr, 0, nullptr);
-    }
-
-    wprintf(L"[CrashHandler] Installed. Reporter: %ls, Level: %d, Watchdog: %s\n",
-        g_ReporterPath.c_str(), (int)level, enableWatchdog ? "ON" : "OFF");
 }
 
 void CrashHandler::SetDumpLevel(DumpLevel level)
