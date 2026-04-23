@@ -51,7 +51,14 @@ void BusinessLib::CrashInWorkerThread()
     for (int i = 0; i < 6; ++i) {
         // 加入少量延迟，让崩溃时间稍微错开
         //Sleep(i * 10);
-        threads.emplace_back([] { BusinessLib::NullPointer(); });
+        if (i % 2 == 0)
+        {
+            threads.emplace_back([] { BusinessLib::StackOverflow(); });
+        }
+        else
+        {
+            threads.emplace_back([] { BusinessLib::NullPointer(); });
+        }
     }
     for (auto& t : threads) if (t.joinable()) t.join();
 }

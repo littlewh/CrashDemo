@@ -6,16 +6,17 @@
 #include <atomic>
 #include <shlobj.h>
 #include <tlhelp32.h>   // 用于线程快照
+#include <iostream>
 
 #pragma comment(lib, "dbghelp.lib")
 
 // 全局配置
-static CrashHandler::DumpLevel g_DumpLevel = CrashHandler::DumpLevel::Normal;
-static std::wstring g_ReporterPath;
-static HANDLE g_WatchdogThread = nullptr;
-static bool g_EnableWatchdog = true;
-static HANDLE g_CrashMutex = nullptr;           // 命名互斥体
-static std::atomic<DWORD> g_CrashingThreadId{ 0 };
+static CrashHandler::DumpLevel g_DumpLevel = CrashHandler::DumpLevel::Normal; // Dump文件 详细级别
+static std::wstring g_ReporterPath; // Reporter 可执行文件路径（默认为当前目录下的 CrashReporter.exe）
+static HANDLE g_WatchdogThread = nullptr; // 看门狗线程句柄
+static bool g_EnableWatchdog = true; // 是否启用看门狗线程
+//static HANDLE g_CrashMutex = nullptr;           // 命名互斥体
+//static std::atomic<DWORD> g_CrashingThreadId{ 0 }; //记录第一个崩溃线程ID，确保只挂起其他线程一次
 static std::atomic<bool> g_GlobalInitDone{ false };//初始化标志，确保全局只初始化一次
 
 // 生成 MINIDUMP_TYPE
@@ -93,25 +94,30 @@ static void SuspendOtherThreads(DWORD crashingThreadId)
     CloseHandle(hSnapshot);
 }
 
-
 // 独立 Reporter 进程启动函数（供外部调用）
 void CrashHandler::GenerateCrashDump(DWORD exceptionCode)
 {
     DWORD currentThreadId = GetCurrentThreadId();
     // 记录第一个崩溃的线程ID
-    DWORD expected = 0;
-    if (g_CrashingThreadId.compare_exchange_strong(expected, currentThreadId))
-    {
-        // 第一个崩溃线程：挂起所有其他线程，防止进一步破坏
-        SuspendOtherThreads(currentThreadId);
-        wprintf(L"[CrashHandler] First crashing thread: %u. Suspending others.\n", currentThreadId);
-    }
-    // 使用命名Mutex确保只有一个Reporter进程在写Dump
-    if (WaitForSingleObject(g_CrashMutex, 8000) != WAIT_OBJECT_0)
-    {//等待8秒，如果拿不到锁，说明已有Reporter在运行，直接退出
-        // 拿不到锁，说明已有Reporter在运行，直接退出
-        return;
-    }
+    /*由于修改原子变量的控制方案后，多线程同时崩溃均可独立捕捉
+        暂时取消以下挂起操作*/
+    //DWORD expected = 0;
+    //if (g_CrashingThreadId.compare_exchange_strong(expected, currentThreadId))
+    //{
+    //    // 第一个崩溃线程：挂起所有其他线程，防止进一步破坏
+    //    SuspendOtherThreads(currentThreadId);
+    //    wprintf(L"[CrashHandler] First crashing thread: %u. Suspending others.\n", currentThreadId);
+    //}
+
+    /*由于多个线程的dump文件可能不同
+        为保证每个线程都能够写出自己的Dump文件
+        Mutex不再使用，否则只生成部分Dump文件*/
+    //// 使用命名Mutex确保只有一个Reporter进程在写Dump
+    //if (WaitForSingleObject(g_CrashMutex, 8000) != WAIT_OBJECT_0)
+    //{//等待8秒，如果拿不到锁，说明已有Reporter在运行，直接退出
+    //    // 拿不到锁，说明已有Reporter在运行，直接退出
+    //    return;
+    //}
 
 
     if (g_ReporterPath.empty())
@@ -150,42 +156,64 @@ static void LaunchReporter(EXCEPTION_POINTERS* exInfo)
 }
 
 // ==================== 各种死亡路径处理器 ====================
-
 LONG CALLBACK VectoredHandler(EXCEPTION_POINTERS* ex)
 {
+#ifdef _DEBUG
+    std::cout << "VEH called! Code: 0x" << std::hex << ex->ExceptionRecord->ExceptionCode << std::dec << std::endl;
+#endif // _DEBUG
+
 	if (ex->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT) // 调试断点，不处理
         return EXCEPTION_CONTINUE_SEARCH;
     LaunchReporter(ex);
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-LONG WINAPI MyFilter(EXCEPTION_POINTERS*)
+// 栈溢出专用处理器（借助备用栈）
+LONG CALLBACK StackOverflowHandler(EXCEPTION_POINTERS* ex)
 {
-    OutputDebugStringA("UEF called!\n");
-    MessageBoxA(NULL, "UEF called", "Test", MB_OK);
-    return EXCEPTION_EXECUTE_HANDLER;
+#ifdef _DEBUG
+    std::cout << "StackOverflowHandler called! Code: 0x" << std::hex << ex->ExceptionRecord->ExceptionCode << std::dec << std::endl;
+#endif
+    if (ex->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW)
+    {
+        LaunchReporter(ex);
+        TerminateProcess(GetCurrentProcess(), 0xDEAD0002);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
 }
 
 LONG WINAPI TopLevelFilter(EXCEPTION_POINTERS* ex)
 {
+#ifdef _DEBUG
+	std::cout << "UEF called! Code: 0x" << std::hex << ex->ExceptionRecord->ExceptionCode << std::dec << std::endl;
+#endif // _DEBUG
     LaunchReporter(ex);
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
 void PureCallHandler()
 {
+#ifdef _DEBUG
+	std::cout << "PureCallHandler called!" << std::endl;
+#endif
     LaunchReporter(nullptr);
     abort();
 }
 
 void InvalidParameterHandler(const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, uintptr_t)
 {
+#ifdef _DEBUG
+	std::cout << "InvalidParameterHandler called!" << std::endl;
+#endif
     LaunchReporter(nullptr);
     abort();
 }
 
 void TerminateHandler()
 {
+#ifdef _DEBUG
+	std::cout << "TerminateHandler called!" << std::endl;
+#endif
     EXCEPTION_RECORD rec = { STATUS_FATAL_APP_EXIT };
     CONTEXT ctx{};
     RtlCaptureContext(&ctx);
@@ -196,19 +224,18 @@ void TerminateHandler()
 
 void SignalHandler(int)
 {
+#ifdef _DEBUG
+	std::cout << "SignalHandler called!" << std::endl;
+#endif
     LaunchReporter(nullptr);
     _exit(1);
 }
 
-// 栈溢出专用处理器（借助备用栈）
-LONG CALLBACK StackOverflowHandler(EXCEPTION_POINTERS* ex)
+LONG WINAPI MyFilter(EXCEPTION_POINTERS*)
 {
-    if (ex->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW)
-    {
-        LaunchReporter(ex);
-        TerminateProcess(GetCurrentProcess(), 0xDEAD0002);
-    }
-    return EXCEPTION_CONTINUE_SEARCH;
+    OutputDebugStringA("UEF called!\n");
+    MessageBoxA(NULL, "UEF called", "Test", MB_OK);
+    return EXCEPTION_EXECUTE_HANDLER;
 }
 
 // ==================== Watchdog 线程（第二重保障）====================
@@ -248,8 +275,8 @@ void CrashHandler::Install(const std::wstring& reporterPath, DumpLevel level, bo
 	// 避免多次调用 Install 导致重复注册处理器、启动多个看门狗线程等问题
     if (!g_GlobalInitDone.exchange(true))
     {
-        if (!g_CrashMutex)
-            g_CrashMutex = CreateMutexW(nullptr, FALSE, L"Global\\CAD_CrashMutex");  // 全局命名Mutex
+        //if (!g_CrashMutex)
+        //    g_CrashMutex = CreateMutexW(nullptr, FALSE, L"Global\\CAD_CrashMutex");  // 全局命名Mutex
 
         g_DumpLevel = level;
         g_ReporterPath = reporterPath.empty() ? L"CrashReporter.exe" : reporterPath;
