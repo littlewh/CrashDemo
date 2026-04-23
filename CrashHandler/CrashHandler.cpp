@@ -12,9 +12,11 @@
 // 全局配置
 static CrashHandler::DumpLevel g_DumpLevel = CrashHandler::DumpLevel::Normal;
 static std::wstring g_ReporterPath;
-static std::atomic<bool> g_Dumping{ false };
+//static std::atomic<bool> g_Dumping{ false };
 static HANDLE g_WatchdogThread = nullptr;
 static bool g_EnableWatchdog = true;
+static HANDLE g_CrashMutex = nullptr;           // 命名互斥体
+static std::atomic<DWORD> g_CrashingThreadId{ 0 };
 
 // 生成 MINIDUMP_TYPE
 MINIDUMP_TYPE CrashHandler::GetDumpType(const CrashHandler::DumpLevel& i_emLevel)
@@ -66,12 +68,54 @@ static std::wstring GetDumpPath(DWORD exceptionCode)
     return path;
 }
 
+// ====================== 挂起其他线程（关键） ======================
+static void SuspendOtherThreads(DWORD crashingThreadId)
+{
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 te = { sizeof(te) };
+    if (Thread32First(hSnapshot, &te))
+    {
+        do
+        {
+            if (te.th32OwnerProcessID == GetCurrentProcessId() &&
+                te.th32ThreadID != crashingThreadId)
+            {
+                HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+                if (hThread)
+                {
+                    SuspendThread(hThread);
+                    CloseHandle(hThread);
+                }
+            }
+        } while (Thread32Next(hSnapshot, &te));
+    }
+    CloseHandle(hSnapshot);
+}
+
 
 // 独立 Reporter 进程启动函数（供外部调用）
 void CrashHandler::GenerateCrashDump(DWORD exceptionCode)
 {
-    if (g_Dumping.exchange(true))
+    //if (g_Dumping.exchange(true))
+    //    return;
+
+    DWORD currentThreadId = GetCurrentThreadId();
+    // 记录第一个崩溃的线程ID
+    DWORD expected = 0;
+    if (g_CrashingThreadId.compare_exchange_strong(expected, currentThreadId))
+    {
+        // 第一个崩溃线程：挂起所有其他线程，防止进一步破坏
+        SuspendOtherThreads(currentThreadId);
+        wprintf(L"[CrashHandler] First crashing thread: %u. Suspending others.\n", currentThreadId);
+    }
+    // 使用命名Mutex确保只有一个Reporter进程在写Dump
+    if (WaitForSingleObject(g_CrashMutex, 8000) != WAIT_OBJECT_0)
+    {//等待8秒，如果拿不到锁，说明已有Reporter在运行，直接退出
+        // 拿不到锁，说明已有Reporter在运行，直接退出
         return;
+    }
+
 
     if (g_ReporterPath.empty())
     {
@@ -80,11 +124,12 @@ void CrashHandler::GenerateCrashDump(DWORD exceptionCode)
     }
 
     wchar_t cmd[1024];
-    swprintf_s(cmd, L"\"%s\" --pid=%u --code=0x%08X --level=%d",
+    swprintf_s(cmd, L"\"%s\" --pid=%u --code=0x%08X --level=%d --tid=%u",
         g_ReporterPath.c_str(),
         GetCurrentProcessId(),
         exceptionCode,
-        (int)g_DumpLevel);
+        (int)g_DumpLevel,
+        currentThreadId);
 
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi;
@@ -93,12 +138,12 @@ void CrashHandler::GenerateCrashDump(DWORD exceptionCode)
     {
         if (pi.hProcess)
         {
-            WaitForSingleObject(pi.hProcess, 15000);  // 融合 B 的 15 秒等待
+			WaitForSingleObject(pi.hProcess, 20000);  // 等待Reporter最多20秒，防止僵尸进程
             CloseHandle(pi.hProcess);
             CloseHandle(pi.hThread);
         }
     }
-    g_Dumping = false;
+    //g_Dumping = false;
 }
 
 // 内部调用：从异常信息启动 Reporter
@@ -203,6 +248,9 @@ void CrashHandler::Install(const std::wstring& reporterPath, DumpLevel level, bo
         return;
     }
     installed = true;
+
+    if (!g_CrashMutex)
+        g_CrashMutex = CreateMutexW(nullptr, FALSE, L"Global\\CAD_CrashMutex");  // 全局命名Mutex
 
     g_DumpLevel = level;
     g_ReporterPath = reporterPath.empty() ? L"CrashReporter.exe" : reporterPath;

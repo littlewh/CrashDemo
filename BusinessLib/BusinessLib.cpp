@@ -2,6 +2,7 @@
 #include <stdexcept>
 #include <vector>
 #include <thread>
+#include <shlobj.h>
 
 struct Base { virtual void foo() = 0; };
 struct Derived : Base { void foo() override {} };
@@ -38,6 +39,7 @@ void BusinessLib::UncaughtException()
     throw std::runtime_error("Test uncaught exception");
 }
 
+
 void BusinessLib::CrashInWorkerThread()
 {
     /*std::thread t([] {
@@ -47,6 +49,8 @@ void BusinessLib::CrashInWorkerThread()
 
     std::vector<std::thread> threads;
     for (int i = 0; i < 6; ++i) {
+        // 加入少量延迟，让崩溃时间稍微错开
+        //Sleep(i * 10);
         threads.emplace_back([] { BusinessLib::NullPointer(); });
     }
     for (auto& t : threads) if (t.joinable()) t.join();

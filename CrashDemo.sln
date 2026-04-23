@@ -1,14 +1,14 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 18
-VisualStudioVersion = 18.4.11626.88 stable
+VisualStudioVersion = 18.4.11626.88
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "CrashHandler", "CrashHandler\CrashHandler.vcxproj", "{76638B3E-A444-415B-8D95-E788F8D03565}"
-	ProjectSection(ProjectDependencies) = postProject
-		{4AD05F6C-0ABC-453B-A94A-9270FD6BC42A} = {4AD05F6C-0ABC-453B-A94A-9270FD6BC42A}
-	EndProjectSection
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "CrashReporter", "CrashReporter\CrashReporter.vcxproj", "{1FAD485B-7D4C-469F-A0BE-4F1B8E548543}"
+	ProjectSection(ProjectDependencies) = postProject
+		{76638B3E-A444-415B-8D95-E788F8D03565} = {76638B3E-A444-415B-8D95-E788F8D03565}
+	EndProjectSection
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "BusinessLib", "BusinessLib\BusinessLib.vcxproj", "{1A0F9528-5826-417D-BF67-4573E48E2E30}"
 EndProject
@@ -21,6 +21,9 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "MainApp", "MainApp\MainApp.
 	EndProjectSection
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "DynamicPlugin", "DynamicPlugin\DynamicPlugin.vcxproj", "{4AD05F6C-0ABC-453B-A94A-9270FD6BC42A}"
+	ProjectSection(ProjectDependencies) = postProject
+		{76638B3E-A444-415B-8D95-E788F8D03565} = {76638B3E-A444-415B-8D95-E788F8D03565}
+	EndProjectSection
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
