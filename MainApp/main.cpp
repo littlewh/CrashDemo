@@ -16,9 +16,15 @@ void PrintMenu()
     printf("7. Crash in DLL\n");
     printf("8. while\n");
     printf("9. DynamicLib_TriggerNullPointer\n");
+	printf("10. C++ Exception (noexcept)\n");
+	printf("11. Invalid Parameter (fopen with invalid mode)\n");
+	printf("12. abort()\n");
+	printf("13. Double Free\n");
     printf("0. Exit\n");
     printf("Choice: ");
 }
+
+void func() noexcept { throw 1; }
 
 int main()
 {
@@ -75,6 +81,24 @@ int main()
             case 9:
                 DynamicLib_TriggerNullPointer();
                 break;
+            case 10:
+                func();
+				break;
+            case 11:
+                fopen("file.txt", "z");
+                //printf(nullptr);
+                //strcpy(nullptr, "src");
+                //memcpy(buf, buf + 1, 10);
+                break;
+            case 12:
+                abort();
+                break;
+            case 13:
+            {
+                int* p = new int;
+                delete p; delete p;
+            }
+            break;
             case 0: return 0;
             default: printf("Invalid choice.\n");
             }

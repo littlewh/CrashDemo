@@ -165,6 +165,7 @@ LONG CALLBACK VectoredHandler(EXCEPTION_POINTERS* ex)
 	if (ex->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT) // 调试断点，不处理
         return EXCEPTION_CONTINUE_SEARCH;
     LaunchReporter(ex);
+    //TerminateProcess(GetCurrentProcess(), 0xDEAD0002);
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -216,7 +217,7 @@ void TerminateHandler()
 #endif
     EXCEPTION_RECORD rec = { STATUS_FATAL_APP_EXIT };
     CONTEXT ctx{};
-    RtlCaptureContext(&ctx);
+	RtlCaptureContext(&ctx); // 捕获当前上下文信息，供 Reporter 分析调用栈等
     EXCEPTION_POINTERS ptr{ &rec, &ctx };
     LaunchReporter(&ptr);
     abort();
@@ -282,33 +283,18 @@ void CrashHandler::Install(const std::wstring& reporterPath, DumpLevel level, bo
         g_ReporterPath = reporterPath.empty() ? L"CrashReporter.exe" : reporterPath;
         g_EnableWatchdog = enableWatchdog;
 
-        // 1. 预留栈溢出备用空间（64KB）
+        // 预留栈溢出备用空间（64KB）
         //  用以发生栈溢出时，仍能在备用栈上执行异常处理器，生成 Dump
         ULONG guaranteeSize = 65536;
         SetThreadStackGuarantee(&guaranteeSize);
 
-        // 2. 安装向量化异常处理器（含栈溢出专用）
+        // 安装向量化异常处理器（含栈溢出专用）
         //  VEH 的优先级高于 UEF，可以捕获更多异常（如栈溢出），并且不受当前模块的 SEH 影响
         //  VEH 链表累加，后安装的先执行，所以先安装通用处理器，再安装专门处理栈溢出的处理器，确保栈溢出时能正确处理
         AddVectoredExceptionHandler(1, VectoredHandler);
         AddVectoredExceptionHandler(1, StackOverflowHandler);
 
-        // 3. C++ 运行时钩子
-        //  捕获纯虚函数调用、无效参数、std::terminate 导致的崩溃等 C++ 运行时错误
-        std::set_terminate(TerminateHandler);
-        _set_purecall_handler(PureCallHandler);
-        _set_invalid_parameter_handler(InvalidParameterHandler);
-        _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
-
-        // 4. C 信号
-        //  捕获 SIGABRT、SIGTERM 等信号引发的崩溃
-        signal(SIGABRT, SignalHandler);
-        signal(SIGTERM, SignalHandler);
-
-        // 5. 禁用 Windows 错误报告弹窗
-        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
-
-        // 6. 启动看门狗线程（可选）
+        // 启动看门狗线程（可选）
         //  看门狗线程定期检查主线程心跳，如果主线程长时间无响应（可能死循环或卡死），强制生成 Dump
         if (g_EnableWatchdog)
         {
@@ -323,6 +309,21 @@ void CrashHandler::Install(const std::wstring& reporterPath, DumpLevel level, bo
     //  UEF 单个指针覆盖
     // 每次调用都必须重新设置的 UEF（因为可能被其它代码覆盖）
     SetUnhandledExceptionFilter(TopLevelFilter);
+    // C++ 运行时钩子
+    //  捕获纯虚函数调用、无效参数、std::terminate 导致的崩溃等 C++ 运行时错误
+    std::set_terminate(TerminateHandler);
+    _set_purecall_handler(PureCallHandler);
+    _set_invalid_parameter_handler(InvalidParameterHandler);
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+
+    // C 信号
+    //  捕获 SIGABRT、SIGTERM 等信号引发的崩溃
+    signal(SIGABRT, SignalHandler);
+    signal(SIGTERM, SignalHandler);
+
+    // 禁用 Windows 错误报告弹窗
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+
 }
 
 void CrashHandler::SetDumpLevel(DumpLevel level)

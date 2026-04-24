@@ -10,5 +10,5 @@ CrashDemo_Final/
 ├── DynamicPlugin/                # 动态库 - 测试 DLL 内崩溃
 │   ├── include/DynamicPlugin.h
 │   └── src/DynamicPlugin.cpp
-├── MainApp/                      # 主程序
+└──  MainApp/                      # 主程序
      └── src/main.cpp
